@@ -1,0 +1,1143 @@
+
+These are the patches I've applied to Soot 2.1.0:
+
+#1. Fix bug in handling CONSTANT_Methodref or CONSTANT_InterfaceMethodref
+    where the class name is an array class e.g., "[B" clone().
+
+#2. Add support for annotating SootClass objects with "SourceFileTag" and
+    "InnerClassTag" tags based on the corresponding class file class
+    attributes.
+
+#3. Add support annotating SootField objects with "ConstantValueTag"
+    tags based on the corresponding class file field attributes.
+
+#4. Other minor tweaks.
+
+#5. Fix bugs in soot/toolkits/graph/BlockGraph.java where the incorrect
+    assumption is made that the first statement in a body is never a target.
+
+#6. Fix bug in soot/jimple/toolkits/invoke/SiteInliner where it was merging
+    in the inlined method's trap table in reversed order.
+
+#7. Fix bugs in soot/toolkits/scalar/*FlowAnalysis.java. This is the same
+    patch as Soot subversion repository commit #1627.
+
+#8. Fix Soot bug #95 in soot/jimple/toolkits/pointer/CastCheckEliminator.
+    Same patch as Soot subversion repository commit #1635.
+
+#9. Fix bug in soot.coffi.Util.isValidJimpleName().
+    Same patch as Soot subversion repository commit #1668.
+
+#10. Fix bug in soot.coffi.CFG. Same patch as Soot subversion
+     repository commit #1396.
+
+#11. Fix bug in soot.coffi.CFG. Same patch as Soot subversion
+     repository commit #1760.
+
+#12. Fix bug in soot.jimple.toolkit.annotation.arraycheck.ClassFieldAnalysis.
+     Same patch as Soot subversion repository commit #1900.
+
+#12. Fix bugs in soot.jimple.toolkit.scalar.DeadAssignmentEliminator.
+     Same patch as Soot subversion commits #1407, #1997, ????.
+
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/CFG.java src/soot/coffi/CFG.java
+--- original.src/soot/coffi/CFG.java	Mon Sep 29 11:05:59 2003
++++ src/soot/coffi/CFG.java	Fri Aug  6 16:55:14 2004
+@@ -735,7 +735,7 @@
+ 
+ 	    LinkedList newentries = new LinkedList();
+ 
+-	    int orig_start_of_subr = headbefore.next.originalIndex; // inclusive
++	    int orig_start_of_subr = astore.next.originalIndex; // inclusive
+ 	    int orig_end_of_subr = ret.originalIndex; // again, inclusive
+ 
+ 	    for (int i=0; i<ca.exception_table_length; i++) 
+@@ -924,7 +924,7 @@
+ 		    newdefault.labelled = true;
+ 		}
+ 
+-		for (int i=0; i<switchinsn.high-switchinsn.low; i++)
++		for (int i=0; i<=switchinsn.high-switchinsn.low; i++)
+ 		{
+ 		    Instruction newtgt = 
+ 			(Instruction)replacedInsns.get(switchinsn.jump_insts[i]);
+@@ -4431,6 +4431,9 @@
+             String methodDescriptor = ((CONSTANT_Utf8_info) (constant_pool[i.descriptor_index])).
+                 convert();
+ 
++	    if (className.charAt(0) == '[')
++	    	className = "java.lang.Object";
++
+             SootClass bclass = cm.getSootClass(className);
+ 
+             Local[] parameters;
+@@ -4659,6 +4662,9 @@
+                 String methodName = ((CONSTANT_Utf8_info) (constant_pool[i.name_index])).convert();
+                 String methodDescriptor = ((CONSTANT_Utf8_info) (constant_pool[i.descriptor_index])).
+                     convert();
++
++		if (className.charAt(0) == '[')
++		    className = "java.lang.Object";
+ 
+                 SootClass bclass = cm.getSootClass(className);
+ 
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/ClassFile.java src/soot/coffi/ClassFile.java
+--- original.src/soot/coffi/ClassFile.java	Tue Jun  3 07:12:25 2003
++++ src/soot/coffi/ClassFile.java	Fri Apr 16 14:24:52 2004
+@@ -674,6 +674,20 @@
+                la.local_variable_table[k] = e;
+             }
+             a = (attribute_info)la;
++	 } else if(s.compareTo(attribute_info.InnerClasses)==0)
++	 {
++	    InnerClasses_attribute ia = new InnerClasses_attribute();
++	    ia.inner_classes_length = d.readUnsignedShort();
++	    ia.inner_classes = new inner_class_entry[ia.inner_classes_length];
++	    for (int k = 0; k < ia.inner_classes_length; k++) {
++	       inner_class_entry e = new inner_class_entry();
++	       e.inner_class_index = d.readUnsignedShort();
++	       e.outer_class_index = d.readUnsignedShort();
++	       e.name_index = d.readUnsignedShort();
++	       e.access_flags = d.readUnsignedShort();
++	       ia.inner_classes[k] = e;
++	    }
++	    a = (attribute_info)ia;
+          } else {
+             // unknown attribute
+             // G.v().out.println("Generic/Unknown Attribute: " + s);
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/InnerClasses_attribute.java src/soot/coffi/InnerClasses_attribute.java
+--- original.src/soot/coffi/InnerClasses_attribute.java	Wed Dec 31 18:00:00 1969
++++ src/soot/coffi/InnerClasses_attribute.java	Fri Apr 16 14:24:52 2004
+@@ -0,0 +1,57 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2004 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++
++
++
++
++
++
++package soot.coffi;
++import soot.*;
++
++import java.io.*;
++
++/** Attribute that connects inner classes with their containing classes.
++ * @see attribute_info
++ * @author Archie L. Cobbs
++ */
++class InnerClasses_attribute extends attribute_info {
++   /** Length of the inner classes table. */
++   public int inner_classes_length;
++   /** Actual table of local variables. */
++   public inner_class_entry inner_classes[];
++
++   public String toString()
++   {
++        StringBuffer buffer = new StringBuffer();
++        for (int i = 0; i < inner_classes_length; i++) {
++            buffer.append(inner_classes[i]);
++            buffer.append('\n');
++	}
++        return buffer.toString();
++   }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/Util.java src/soot/coffi/Util.java
+--- original.src/soot/coffi/Util.java	Mon Jul  7 12:55:26 2003
++++ src/soot/coffi/Util.java	Wed Jul 28 12:57:50 2004
+@@ -36,6 +36,7 @@
+ import java.util.*;
+ import java.io.*;
+ import soot.baf.*;
++import soot.tagkit.*;
+ import soot.*;
+ 
+ 
+@@ -407,10 +408,50 @@
+                 int modifiers = fieldInfo.access_flags;
+                 Type fieldType = jimpleTypeOfFieldDescriptor(cm, fieldDescriptor);
+                     
+-                bclass.addField(new SootField(fieldName,
+-                                              fieldType, modifiers));
++                SootField field = new SootField(fieldName, fieldType, modifiers);
++                bclass.addField(field);
+                     
+                 sootResolver.assertResolvedClassForType(fieldType);
++    
++                // add initialization constant, if any
++		for(int j = 0; j < fieldInfo.attributes_count; j++) {
++		    if (!(fieldInfo.attributes[j] instanceof ConstantValue_attribute))
++			continue;
++		    ConstantValue_attribute attr = (ConstantValue_attribute) fieldInfo.attributes[j];
++		    cp_info cval = coffiClass.constant_pool[attr.constantvalue_index];
++		    ConstantValueTag tag;
++		    switch (cval.tag) {
++		    case cp_info.CONSTANT_Integer:
++			tag = new IntegerConstantValueTag((int)((CONSTANT_Integer_info)cval).bytes);
++			break;
++		    case cp_info.CONSTANT_Float:
++			tag = new FloatConstantValueTag((int)((CONSTANT_Float_info)cval).bytes);
++			break;
++		    case cp_info.CONSTANT_Long:
++		      {
++			CONSTANT_Long_info lcval = (CONSTANT_Long_info)cval;
++			tag = new LongConstantValueTag((lcval.high << 32) + lcval.low);
++			break;
++		      }
++		    case cp_info.CONSTANT_Double:
++		      {
++			CONSTANT_Double_info dcval = (CONSTANT_Double_info)cval;
++			tag = new DoubleConstantValueTag((dcval.high << 32) + dcval.low);
++			break;
++		      }
++		    case cp_info.CONSTANT_String:
++		      {
++			CONSTANT_String_info scval = (CONSTANT_String_info)cval;
++			CONSTANT_Utf8_info ucval = (CONSTANT_Utf8_info)coffiClass.constant_pool[scval.string_index];
++			tag = new StringConstantValueTag(ucval.convert());
++			break;
++		      }
++		    default:
++			throw new RuntimeException("unexpected ConstantValue: " + cval);
++		    }
++		    field.addTag(tag);
++		    break;
++		}
+             }
+     
+         // Add every method to the bclass
+@@ -508,6 +549,42 @@
+                 methodInfo.jmethod.setSource(new CoffiMethodSource(coffiClass, methodInfo));
+             }
+         
++	// Set "SourceFile" attribute tag
++	for(int i = 0; i < coffiClass.attributes_count; i++)
++	    {
++		if(!(coffiClass.attributes[i] instanceof SourceFile_attribute))
++		    continue;
++		SourceFile_attribute attr = (SourceFile_attribute)coffiClass.attributes[i];
++		bclass.addTag(new SourceFileTag(
++		    ((CONSTANT_Utf8_info)(coffiClass.constant_pool[attr.sourcefile_index])).convert()));
++		break;
++	    }
++
++	// Set "InnerClass" attribute tag
++	for(int i = 0; i < coffiClass.attributes_count; i++)
++	    {
++		if(!(coffiClass.attributes[i] instanceof InnerClasses_attribute))
++		    continue;
++		InnerClasses_attribute attr = (InnerClasses_attribute)coffiClass.attributes[i];
++		for (int j = 0; j < attr.inner_classes_length; j++)
++		    {
++		    	inner_class_entry e = attr.inner_classes[j];
++			String inner = null;
++			String outer = null;
++			String name = null;
++			int class_index;
++
++			if (e.inner_class_index != 0)
++				inner = ((CONSTANT_Utf8_info)coffiClass.constant_pool[((CONSTANT_Class_info)coffiClass.constant_pool[e.inner_class_index]).name_index]).convert();
++			if (e.outer_class_index != 0)
++				outer = ((CONSTANT_Utf8_info)coffiClass.constant_pool[((CONSTANT_Class_info)coffiClass.constant_pool[e.outer_class_index]).name_index]).convert();
++			if (e.name_index != 0)
++				name = ((CONSTANT_Utf8_info)(coffiClass.constant_pool[e.name_index])).convert();
++			bclass.addTag(new InnerClassTag(inner, outer, name, e.access_flags));
++		    }
++		break;
++	    }
++
+     }
+     
+ 
+@@ -1129,6 +1206,7 @@
+      * @author Patrick Lam
+      */
+     boolean isValidJimpleName(String prospectiveName) {
++        if(prospectiveName == null) return false;
+ 	for (int i = 0; i < prospectiveName.length(); i++) {
+ 	    char c = prospectiveName.charAt(i);
+ 	    if (i == 0 && c >= '0' && c <= '9')
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/attribute_info.java src/soot/coffi/attribute_info.java
+--- original.src/soot/coffi/attribute_info.java	Tue Jun  3 07:12:25 2003
++++ src/soot/coffi/attribute_info.java	Fri Apr 16 14:24:52 2004
+@@ -61,6 +61,10 @@
+     * @see LocalVariableTable_attribute
+     */
+    public static final String LocalVariableTable = "LocalVariableTable";
++   /** String by which a InnerClasses attribute is recognized.
++    * @see InnerClasses_attribute
++    */
++   public static final String InnerClasses = "InnerClasses";
+ 
+    /** Constant pool index of the name of this attribute; should be a utf8 String
+     * matching one of the constant Strings define here.
+@@ -70,6 +74,7 @@
+     * @see attribute_info#Exceptions
+     * @see attribute_info#LineNumberTable
+     * @see attribute_info#LocalVariableTable
++    * @see attribute_info#InnerClasses
+     * @see CONSTANT_Utf8_info
+     */
+    public int attribute_name;
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/coffi/inner_class_entry.java src/soot/coffi/inner_class_entry.java
+--- original.src/soot/coffi/inner_class_entry.java	Wed Dec 31 18:00:00 1969
++++ src/soot/coffi/inner_class_entry.java	Fri Apr 16 14:24:52 2004
+@@ -0,0 +1,47 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2004 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++
++
++
++
++
++
++package soot.coffi;
++
++/** An entry in the inner classes table.
++ * @see InnerClasses_attribute
++ * @author Archie L. Cobbs
++ */
++class inner_class_entry {
++    /** Constant pool index for the inner class name */
++    public int inner_class_index;
++    /** Constant pool index for the outer class name */
++    public int outer_class_index;
++    /** Short name for the inner class if any, otherwise zero */
++    public int name_index;
++    /** Access flags for inner class */
++    public int access_flags;
++}
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/jimple/toolkits/invoke/SiteInliner.java src/soot/jimple/toolkits/invoke/SiteInliner.java
+--- original.src/soot/jimple/toolkits/invoke/SiteInliner.java	Tue Jun  3 07:12:25 2003
++++ src/soot/jimple/toolkits/invoke/SiteInliner.java	Sat Jul 17 14:55:19 2004
+@@ -248,9 +248,10 @@
+             }
+         }
+ 
+-        // Copy & backpatch the traps.
++        // Copy & backpatch the traps; preserve their same order.
+         {
+             Iterator trapsIt = inlineeB.getTraps().iterator();
++	    Trap prevTrap = null;
+ 
+             while (trapsIt.hasNext())
+             {
+@@ -262,9 +263,13 @@
+                 if (newBegin == null || newEnd == null || newHandler == null)
+                     throw new RuntimeException("couldn't map trap!");
+ 
+-                containerB.getTraps().addFirst(Jimple.v().newTrap
+-                                               (t.getException(),
+-                                                newBegin, newEnd, newHandler));
++		Trap trap = Jimple.v().newTrap(t.getException(),
++		    newBegin, newEnd, newHandler);
++		if (prevTrap == null)
++			containerB.getTraps().addFirst(trap);
++		else
++			containerB.getTraps().insertAfter(trap, prevTrap);
++		prevTrap = trap;
+             }
+         }
+ 
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/jimple/toolkits/pointer/CastCheckEliminator.java src/soot/jimple/toolkits/pointer/CastCheckEliminator.java
+--- original.src/soot/jimple/toolkits/pointer/CastCheckEliminator.java	Mon Jun  2 16:04:36 2003
++++ src/soot/jimple/toolkits/pointer/CastCheckEliminator.java	Tue Jul 20 17:40:42 2004
+@@ -1,5 +1,5 @@
+ /* Soot - a J*va Optimization Framework
+- * Copyright (C) 2003 Ondrej Lhotak
++ * Copyright (C) 2003, 2004 Ondrej Lhotak
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+@@ -41,8 +41,8 @@
+ 
+     /** Put the results of the analysis into tags in cast statements. */
+     protected void tagCasts() {
+-        for( Iterator it = ((UnitGraph)graph).getBody().getUnits().iterator(); it.hasNext(); ) {
+-            Stmt s = (Stmt) it.next();
++        for( Iterator sIt = ((UnitGraph)graph).getBody().getUnits().iterator(); sIt.hasNext(); ) {
++            final Stmt s = (Stmt) sIt.next();
+             if( s instanceof AssignStmt ) {
+                 AssignStmt as = (AssignStmt) s;
+                 Value rhs = as.getRightOp();
+@@ -50,10 +50,15 @@
+                     CastExpr cast = (CastExpr) rhs;
+                     Type t = cast.getCastType();
+                     if( t instanceof RefType ) {
+-                        Local l = (Local) cast.getOp(); 
+-                        LocalTypeSet set = (LocalTypeSet) unitToBeforeFlow.get(s);
+-                        s.addTag( new CastCheckTag( set.get( set.indexOf(
+-                                                                         l, (RefType) t ) ) ) );
++                        if( cast.getOp() instanceof Local ) {
++                            Local l = (Local) cast.getOp(); 
++                            LocalTypeSet set = (LocalTypeSet) unitToBeforeFlow.get(s);
++                            s.addTag( new CastCheckTag( set.get( set.indexOf(
++                                    l, (RefType) t ) ) ) );
++                        } else {
++                            NullConstant nc = (NullConstant) cast.getOp();
++                            s.addTag( new CastCheckTag( true ) );
++                        }
+                     }
+                 }
+             }
+@@ -67,8 +72,8 @@
+         // Find all locals of reference type
+         Chain locals = ((UnitGraph)graph).getBody().getLocals();
+         List refLocals = new ArrayList();
+-        for( Iterator it = locals.iterator(); it.hasNext(); ) {
+-            Local l = (Local) it.next();
++        for( Iterator lIt = locals.iterator(); lIt.hasNext(); ) {
++            final Local l = (Local) lIt.next();
+             if( l.getType() instanceof RefType ) {
+                 refLocals.add( l );
+             }
+@@ -76,8 +81,8 @@
+ 
+         // Find types of all casts
+         List types = new ArrayList();
+-        for( Iterator it = ((UnitGraph)graph).getBody().getUnits().iterator(); it.hasNext(); ) {
+-            Stmt s = (Stmt) it.next();
++        for( Iterator sIt = ((UnitGraph)graph).getBody().getUnits().iterator(); sIt.hasNext(); ) {
++            final Stmt s = (Stmt) sIt.next();
+             if( s instanceof AssignStmt ) {
+                 AssignStmt as = (AssignStmt) s;
+                 Value rhs = as.getRightOp();
+@@ -111,8 +116,8 @@
+         final Stmt stmt = (Stmt) unit;
+         
+         // First kill all locals defined in this statement
+-        for( Iterator it = stmt.getDefBoxes().iterator(); it.hasNext(); ) {
+-            ValueBox b = (ValueBox) it.next();
++        for( Iterator bIt = stmt.getDefBoxes().iterator(); bIt.hasNext(); ) {
++            final ValueBox b = (ValueBox) bIt.next();
+             Value v = b.getValue();
+             if( v instanceof Local && v.getType() instanceof RefType ) {
+                 out.killLocal( (Local) v );
+@@ -131,11 +136,13 @@
+                 } else if( rhs instanceof CastExpr ) {
+                     CastExpr cast = (CastExpr) rhs;
+                     Type castType = cast.getCastType();
+-                    if( castType instanceof RefType ) {
+-                        out.localCopy( l, (Local) cast.getOp() );
+-                        out.localMustBeSubtypeOf( l, (RefType) castType );
+-                        out.localMustBeSubtypeOf( (Local) cast.getOp(),
+-                                                  (RefType) castType );
++                    if( castType instanceof RefType 
++                    &&  cast.getOp() instanceof Local ) {
++                        RefType refType = (RefType) castType;
++                        Local opLocal = (Local) cast.getOp();
++                        out.localCopy( l, opLocal );
++                        out.localMustBeSubtypeOf( l, refType );
++                        out.localMustBeSubtypeOf( opLocal, refType );
+                     }
+                 } else if( rhs instanceof Local ) {
+                     out.localCopy( l, (Local) rhs );
+@@ -157,6 +164,7 @@
+                 if( !(pred.getRightOp() instanceof InstanceOfExpr ) ) break;
+                 InstanceOfExpr iofexpr = (InstanceOfExpr) pred.getRightOp();
+                 if( !(iofexpr.getCheckType() instanceof RefType ) ) break;
++                if( !(iofexpr.getOp() instanceof Local ) ) break;
+                 ConditionExpr c = (ConditionExpr) ifstmt.getCondition();
+                 if( !c.getOp1().equals( pred.getLeftOp() ) ) break;
+                 if( !( c.getOp2() instanceof IntConstant ) ) break;
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/BytecodeOffsetTag.java src/soot/tagkit/BytecodeOffsetTag.java
+--- original.src/soot/tagkit/BytecodeOffsetTag.java	Tue Jun  3 07:12:25 2003
++++ src/soot/tagkit/BytecodeOffsetTag.java	Fri Apr 16 14:24:52 2004
+@@ -49,7 +49,7 @@
+     return "BytecodeOffsetTag";
+   }
+ 
+-  /** Returns the offset in a two byte array.
++  /** Returns the offset in a four byte array.
+    */
+   public byte [] getValue() {
+     byte [] v = new byte[4];
+@@ -58,6 +58,12 @@
+     v[2] = (byte) ((offset >> 8) % 256);;
+     v[3] = (byte) (offset % 256);
+     return v;
++  }
++
++  /** Returns the offset as an int.
++   */
++  public int getBytecodeOffset() {
++    return offset;
+   }
+ 
+   /** Returns the offset in a string.
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/ConstantValueTag.java src/soot/tagkit/ConstantValueTag.java
+--- original.src/soot/tagkit/ConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/ConstantValueTag.java	Fri Apr 16 15:39:12 2004
+@@ -0,0 +1,44 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++public abstract class ConstantValueTag implements Tag
++{
++    protected byte[] bytes;			// encoded constant
++
++    protected ConstantValueTag() {
++    }
++
++    public String getName() {
++	String className = getClass().getName();
++	return className.substring(className.lastIndexOf('.') + 1);
++    }
++
++    public byte[] getValue() {
++	return bytes;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/DoubleConstantValueTag.java src/soot/tagkit/DoubleConstantValueTag.java
+--- original.src/soot/tagkit/DoubleConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/DoubleConstantValueTag.java	Fri Apr 16 15:40:21 2004
+@@ -0,0 +1,54 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++public class DoubleConstantValueTag extends ConstantValueTag
++{
++    private final long value;
++
++    public DoubleConstantValueTag(long value) {
++	this.value = value;
++	this.bytes = new byte[] {
++	  (byte)((value >> 56) & 0xff),
++	  (byte)((value >> 48) & 0xff),
++	  (byte)((value >> 40) & 0xff),
++	  (byte)((value >> 32) & 0xff),
++	  (byte)((value >> 24) & 0xff),
++	  (byte)((value >> 16) & 0xff),
++	  (byte)((value >>  8) & 0xff),
++	  (byte)((value      ) & 0xff)
++	};
++    }
++
++    public double getDoubleValue() {
++	return Double.longBitsToDouble(value);
++    }
++
++    public long getRawBits() {
++	return value;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/FloatConstantValueTag.java src/soot/tagkit/FloatConstantValueTag.java
+--- original.src/soot/tagkit/FloatConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/FloatConstantValueTag.java	Fri Apr 16 15:41:10 2004
+@@ -0,0 +1,50 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++public class FloatConstantValueTag extends ConstantValueTag
++{
++    private final int value;
++
++    public FloatConstantValueTag(int value) {
++	this.value = value;
++	this.bytes = new byte[] {
++	  (byte)((value >> 24) & 0xff),
++	  (byte)((value >> 16) & 0xff),
++	  (byte)((value >>  8) & 0xff),
++	  (byte)((value      ) & 0xff)
++	};
++    }
++
++    public float getFloatValue() {
++	return Float.intBitsToFloat(value);
++    }
++
++    public int getRawBits() {
++	return value;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/InnerClassTag.java src/soot/tagkit/InnerClassTag.java
+--- original.src/soot/tagkit/InnerClassTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/InnerClassTag.java	Fri Apr 16 14:24:52 2004
+@@ -0,0 +1,92 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++
++package soot.tagkit;
++
++import java.io.UnsupportedEncodingException;
++import soot.*;
++
++public class InnerClassTag implements Tag
++{
++    String innerClass;
++    String outerClass;
++    String name;
++    int accessFlags;
++
++    public InnerClassTag(String innerClass, String outerClass, String name, int accessFlags)
++    {
++	this.innerClass = innerClass;
++	this.outerClass = outerClass;
++	this.name = name;
++	this.accessFlags = accessFlags;
++    }
++
++    public String getName()
++    {
++	return "InnerClassTag";
++    }
++
++    /**
++     * Returns the inner class name (only) encoded in UTF8.
++     * There is no obvious standalone byte[] encoding for this
++     * attribute because it contains embedded constant pool indicies.
++     */
++    public byte[] getValue()
++    {
++	try {
++		return innerClass.getBytes("UTF8");
++	} catch (UnsupportedEncodingException e) {
++		return new byte[0];
++	}
++    }
++
++    public String getInnerClass()
++    {
++	return innerClass;
++    }
++
++    public String getOuterClass()
++    {
++	return outerClass;
++    }
++
++    public String getShortName()
++    {
++	return name;
++    }
++
++    public int getAccessFlags()
++    {
++	return accessFlags;
++    }
++
++    public String toString()
++    {
++	return "[inner="+innerClass+", outer="+outerClass
++	    +", name="+name+",flags="+accessFlags+"]";
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/IntegerConstantValueTag.java src/soot/tagkit/IntegerConstantValueTag.java
+--- original.src/soot/tagkit/IntegerConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/IntegerConstantValueTag.java	Fri Apr 16 15:43:56 2004
+@@ -0,0 +1,46 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++public class IntegerConstantValueTag extends ConstantValueTag
++{
++    private final int value;
++
++    public IntegerConstantValueTag(int value) {
++	this.value = value;
++	this.bytes = new byte[] {
++	  (byte)((value >> 24) & 0xff),
++	  (byte)((value >> 16) & 0xff),
++	  (byte)((value >>  8) & 0xff),
++	  (byte)((value      ) & 0xff)
++	};
++    }
++
++    public int getIntValue() {
++	return value;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/LineNumberTag.java src/soot/tagkit/LineNumberTag.java
+--- original.src/soot/tagkit/LineNumberTag.java	Tue Jun  3 07:12:25 2003
++++ src/soot/tagkit/LineNumberTag.java	Fri Apr 16 14:24:52 2004
+@@ -49,6 +49,11 @@
+ 	return v;
+     }
+ 
++    public int getLineNumber()
++    {
++	return line_number;
++    }
++
+     public String toString()
+     {
+    	return ""+line_number;
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/LongConstantValueTag.java src/soot/tagkit/LongConstantValueTag.java
+--- original.src/soot/tagkit/LongConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/LongConstantValueTag.java	Wed Jun 23 17:30:06 2004
+@@ -0,0 +1,50 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++public class LongConstantValueTag extends ConstantValueTag
++{
++    private final long value;
++
++    public LongConstantValueTag(long value) {
++	this.value = value;
++	this.bytes = new byte[] {
++	  (byte)((value >> 56) & 0xff),
++	  (byte)((value >> 48) & 0xff),
++	  (byte)((value >> 40) & 0xff),
++	  (byte)((value >> 32) & 0xff),
++	  (byte)((value >> 24) & 0xff),
++	  (byte)((value >> 16) & 0xff),
++	  (byte)((value >>  8) & 0xff),
++	  (byte)((value      ) & 0xff)
++	};
++    }
++
++    public long getLongValue() {
++	return value;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/SourceFileTag.java src/soot/tagkit/SourceFileTag.java
+--- original.src/soot/tagkit/SourceFileTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/SourceFileTag.java	Fri Apr 16 14:24:52 2004
+@@ -0,0 +1,65 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++
++package soot.tagkit;
++
++import java.io.UnsupportedEncodingException;
++import soot.*;
++
++public class SourceFileTag implements Tag
++{
++    String sourceFile;
++
++    public SourceFileTag(String sourceFile)
++    {
++	this.sourceFile = sourceFile;
++    }
++
++    public String getName()
++    {
++	return "SourceFileTag";
++    }
++
++    public byte[] getValue()
++    {
++	try {
++		return sourceFile.getBytes("UTF8");
++	} catch (UnsupportedEncodingException e) {
++		return new byte[0];
++	}
++    }
++
++    public String getSourceFile()
++    {
++	return sourceFile;
++    }
++
++    public String toString()
++    {
++	return sourceFile;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/tagkit/StringConstantValueTag.java src/soot/tagkit/StringConstantValueTag.java
+--- original.src/soot/tagkit/StringConstantValueTag.java	Wed Dec 31 18:00:00 1969
++++ src/soot/tagkit/StringConstantValueTag.java	Fri Apr 16 15:44:03 2004
+@@ -0,0 +1,43 @@
++/* Soot - a J*va Optimization Framework
++ * Copyright (C) 2003 Archie L. Cobbs
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the
++ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
++ * Boston, MA 02111-1307, USA.
++ */
++
++/*
++ * Modified by the Sable Research Group and others 1997-1999.  
++ * See the 'credits' file distributed with Soot for the complete list of
++ * contributors.  (Soot is distributed at http://www.sable.mcgill.ca/soot)
++ */
++
++package soot.tagkit;
++
++import soot.coffi.CONSTANT_Utf8_info;
++
++public class StringConstantValueTag extends ConstantValueTag
++{
++    private final String value;
++
++    public StringConstantValueTag(String value) {
++	this.value = value;
++	this.bytes = CONSTANT_Utf8_info.toUtf8(value);
++    }
++
++    public String getStringValue() {
++	return value;
++    }
++}
++
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/toolkits/graph/BlockGraph.java src/soot/toolkits/graph/BlockGraph.java
+--- original.src/soot/toolkits/graph/BlockGraph.java	Sat Nov 22 14:16:09 2003
++++ src/soot/toolkits/graph/BlockGraph.java	Thu Jul 15 16:49:19 2004
+@@ -120,7 +120,9 @@
+             // Get the leaders that bound exception contexts.
+             if(type == ZONED) {              
+               List predList = new ArrayList();
+-              predList.add(mUnits.getPredOf(someTrap.getBeginUnit()));
++              if(mUnits.getPredOf(someTrap.getBeginUnit()) != null) {
++		  predList.add(mUnits.getPredOf(someTrap.getBeginUnit()));
++	      }
+               leaders.put(someTrap.getBeginUnit(), predList);
+ 
+               predList = new ArrayList();
+@@ -189,7 +191,7 @@
+                             predecessors= new LinkedList();
+                             predecessors.add(currentUnit);
+                             Unit targetPred = (Unit) mUnits.getPredOf(target);
+-                            if(targetPred.fallsThrough())
++                            if(targetPred != null && targetPred.fallsThrough())
+                                 predecessors.add(targetPred);
+                                 
+                             leaders.put(target, predecessors);
+@@ -238,13 +240,15 @@
+ 
+ 		    if ((nextUnit != null) &&(stmt.containsArrayRef()))
+ 		    {
++			List predecessors;
+ 			if (!leaders.containsKey(nextUnit))
+ 		        {
+-			    List predicessors = new LinkedList();
+-			    predicessors.add(currentUnit);
+-
+-			    leaders.put(nextUnit, predicessors);
++			    predecessors = new LinkedList();
++			    leaders.put(nextUnit, predecessors);
++			} else {
++			    predecessors = (List)leaders.get(nextUnit);
+ 			}
++			predecessors.add(currentUnit);
+ 		    }
+ 		}
+                 
+@@ -264,7 +268,7 @@
+                                 predecessors= new LinkedList();
+                                 predecessors.add(currentUnit);
+                                 Unit targetPred = (Unit) mUnits.getPredOf(target);
+-                                if(targetPred.fallsThrough())
++                                if(targetPred != null && targetPred.fallsThrough())
+                                     predecessors.add(targetPred);
+                             
+                                 leaders.put(target, predecessors);
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/toolkits/scalar/BackwardFlowAnalysis.java src/soot/toolkits/scalar/BackwardFlowAnalysis.java
+--- original.src/soot/toolkits/scalar/BackwardFlowAnalysis.java	Tue Jun  3 07:12:25 2003
++++ src/soot/toolkits/scalar/BackwardFlowAnalysis.java	Mon Jul 19 16:01:17 2004
+@@ -120,7 +120,9 @@
+                         while(succIt.hasNext())
+                         {
+                             Object otherBranchFlow = unitToBeforeFlow.get(succIt.next());
+-                            merge(afterFlow, otherBranchFlow, afterFlow);
++                            Object newAfterFlow = newInitialFlow();
++                            merge(afterFlow, otherBranchFlow, newAfterFlow);
++                            copy(newAfterFlow, afterFlow);
+                         }
+                     }
+                 }
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/toolkits/scalar/ForwardBranchedFlowAnalysis.java src/soot/toolkits/scalar/ForwardBranchedFlowAnalysis.java
+--- original.src/soot/toolkits/scalar/ForwardBranchedFlowAnalysis.java	Tue Jun  3 07:12:25 2003
++++ src/soot/toolkits/scalar/ForwardBranchedFlowAnalysis.java	Mon Jul 19 16:01:17 2004
+@@ -226,7 +226,9 @@
+                         while(predIt.hasNext())
+                         {
+                             Object otherBranchFlow = predIt.next();
+-                            merge(beforeFlow, otherBranchFlow, beforeFlow);
++                            Object newBeforeFlow = newInitialFlow();
++                            merge(beforeFlow, otherBranchFlow, newBeforeFlow);
++                            copy(newBeforeFlow, beforeFlow);
+                         }
+                     }
+                 }
+diff -x generated_options -x *.orig -x *.class -urN original.src/soot/toolkits/scalar/ForwardFlowAnalysis.java src/soot/toolkits/scalar/ForwardFlowAnalysis.java
+--- original.src/soot/toolkits/scalar/ForwardFlowAnalysis.java	Tue Jun  3 07:12:25 2003
++++ src/soot/toolkits/scalar/ForwardFlowAnalysis.java	Mon Jul 19 16:01:17 2004
+@@ -122,7 +122,9 @@
+                         {
+                             Object otherBranchFlow = unitToAfterFlow.get(predIt.
+ next());
+-                            merge(beforeFlow, otherBranchFlow, beforeFlow);
++                            Object newBeforeFlow = newInitialFlow();
++                            merge(beforeFlow, otherBranchFlow, newBeforeFlow);
++                            copy(newBeforeFlow, beforeFlow);
+                         }
+                     }
+                 }
+diff -u original.src/soot/jimple/toolkits/annotation/arraycheck/ClassFieldAnalysis.java src/soot/jimple/toolkits/annotation/arraycheck/ClassFieldAnalysis.java
+--- original.src/soot/jimple/toolkits/annotation/arraycheck/ClassFieldAnalysis.java	2003-12-18 11:43:04.000000000 -0600
++++ src/soot/jimple/toolkits/annotation/arraycheck/ClassFieldAnalysis.java	2004-11-16 08:57:07.000000000 -0600
+@@ -333,7 +333,8 @@
+ 		    }
+ 		    else
+ 		    {
+-			if (oldv.getValue() != length.getValue())
++			if (oldv.isInteger()
++			  && oldv.getValue() != length.getValue())
+ 			{
+ 			    oldv.setTop();
+ 			    candidates.remove(which);
+--- original.src/soot/jimple/toolkits/scalar/DeadAssignmentEliminator.java	Tue Jun  3 14:49:00 2003
++++ src/soot/jimple/toolkits/scalar/DeadAssignmentEliminator.java	Sat May 21 14:35:42 2005
+@@ -125,6 +125,20 @@
+                                 isEssential = true;    
+                             }        
+                         }
++
++                        else if(rhs instanceof CastExpr)
++                        {
++                            // Can trigger ClassCastException
++                            isEssential = true;
++                        }
++
++                        else if (rhs instanceof NewExpr
++			  || (rhs instanceof FieldRef
++			    && !(rhs instanceof InstanceFieldRef)))
++                        {
++                            // Can trigger class initialization
++                            isEssential = true;
++                        }
+                     }
+                 }
+                 
+@@ -236,6 +250,7 @@
+                             // Transform it into a simple invoke.
+                  
+                             Stmt newInvoke = Jimple.v().newInvokeStmt(e);
++                            newInvoke.addAllTagsOf(s);
+                             
+                             units.swapWith(s, newInvoke);
+                         }
